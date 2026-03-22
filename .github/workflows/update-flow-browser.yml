@@ -29,15 +29,12 @@ jobs:
           INCLUDE_PRERELEASES: ${{ inputs.include_prereleases }}
         run: |
           set -euo pipefail
-          python3 -m pip install packaging --disable-pip-version-check -q
           python3 <<'PY'
           import os
           import pathlib
           import re
           import subprocess
           import sys
-
-          from packaging.version import InvalidVersion, Version
 
           def gh_output(name: str, value: str) -> None:
               path = os.environ["GITHUB_OUTPUT"]
@@ -58,6 +55,32 @@ jobs:
               sys.exit(1)
           current = cur_m.group(1)
 
+          def parse_tag(tag: str):
+              match = re.fullmatch(
+                  r"v(?P<core>\d+(?:\.\d+)*)(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
+                  tag,
+              )
+              if not match:
+                  return None
+
+              core = tuple(int(piece) for piece in match.group("core").split("."))
+              if len(core) < 3:
+                  core = core + (0,) * (3 - len(core))
+
+              prerelease = match.group("pre")
+              if prerelease is None:
+                  prerelease_key = (1,)
+              else:
+                  prerelease_key = (
+                      0,
+                      tuple(
+                          (0, int(part)) if part.isdigit() else (1, part)
+                          for part in prerelease.split(".")
+                      ),
+                  )
+
+              return core, prerelease_key
+
           proc = subprocess.run(
               [
                   "gh",
@@ -76,16 +99,12 @@ jobs:
 
           candidates = []
           for tag in tags:
-              if not tag.startswith("v") or len(tag) < 2:
+              parsed = parse_tag(tag)
+              if parsed is None:
                   continue
-              core = tag[1:]
-              try:
-                  pv = Version(core)
-              except InvalidVersion:
+              if not include_prereleases and parsed[1][0] == 0:
                   continue
-              if not include_prereleases and pv.is_prerelease:
-                  continue
-              candidates.append((pv, tag))
+              candidates.append((parsed, tag))
 
           if not candidates:
               print("::error::No parseable tags found for MultiboxLabs/flow-browser")

@@ -26,7 +26,12 @@ echo "Downloading flow-browser ${VERSION}..."
 curl -sL "$TARBALL_URL" -o "$TMPDIR/source.tar.gz"
 
 echo "Extracting bun.lock..."
-tar -xzf "$TMPDIR/source.tar.gz" -C "$TMPDIR" --strip-components=1 "*/bun.lock"
+BUN_LOCK_MEMBER=$(tar -tzf "$TMPDIR/source.tar.gz" | awk '/\/bun\.lock$/ { print; exit }')
+if [ -z "$BUN_LOCK_MEMBER" ]; then
+  echo "Could not find bun.lock in $TARBALL_URL" >&2
+  exit 1
+fi
+tar -xzf "$TMPDIR/source.tar.gz" -C "$TMPDIR" --strip-components=1 "$BUN_LOCK_MEMBER"
 
 echo "Generating sources..."
 bunx flatpak-bun-generator@latest "$TMPDIR/bun.lock" --output "$SCRIPT_DIR/generated-sources.json"
