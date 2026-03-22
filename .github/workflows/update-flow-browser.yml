@@ -1,0 +1,188 @@
+name: Update flow-browser sources
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_prereleases:
+        description: Consider prerelease tags (e.g. alpha/beta/rc) when choosing the latest version
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-flow-browser
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare manifest tag to latest upstream tag
+        id: versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INCLUDE_PRERELEASES: ${{ inputs.include_prereleases }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          def gh_output(name: str, value: str) -> None:
+              path = os.environ["GITHUB_OUTPUT"]
+              with open(path, "a", encoding="utf-8") as f:
+                  f.write(f"{name}={value}\n")
+
+          def env_bool(key: str, default: str = "true") -> bool:
+              return os.environ.get(key, default).strip().lower() in ("1", "true", "yes", "on")
+
+          include_prereleases = env_bool("INCLUDE_PRERELEASES", "true")
+          manifest = pathlib.Path("com.flow_browser.flow.yml").read_text(encoding="utf-8")
+          cur_m = re.search(
+              r"MultiboxLabs/flow-browser/archive/refs/tags/(v[^/\s]+)\.tar\.gz",
+              manifest,
+          )
+          if not cur_m:
+              print("::error::Could not parse flow-browser version from com.flow_browser.flow.yml")
+              sys.exit(1)
+          current = cur_m.group(1)
+
+          def parse_tag(tag: str):
+              match = re.fullmatch(
+                  r"v(?P<core>\d+(?:\.\d+)*)(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
+                  tag,
+              )
+              if not match:
+                  return None
+
+              core = tuple(int(piece) for piece in match.group("core").split("."))
+              if len(core) < 3:
+                  core = core + (0,) * (3 - len(core))
+
+              prerelease = match.group("pre")
+              if prerelease is None:
+                  prerelease_key = (1,)
+              else:
+                  prerelease_key = (
+                      0,
+                      tuple(
+                          (0, int(part)) if part.isdigit() else (1, part)
+                          for part in prerelease.split(".")
+                      ),
+                  )
+
+              return core, prerelease_key
+
+          proc = subprocess.run(
+              [
+                  "gh",
+                  "api",
+                  "repos/MultiboxLabs/flow-browser/tags",
+                  "--paginate",
+                  "--jq",
+                  ".[].name",
+              ],
+              capture_output=True,
+              text=True,
+              check=True,
+              env={**os.environ},
+          )
+          tags = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+          candidates = []
+          for tag in tags:
+              parsed = parse_tag(tag)
+              if parsed is None:
+                  continue
+              if not include_prereleases and parsed[1][0] == 0:
+                  continue
+              candidates.append((parsed, tag))
+
+          if not candidates:
+              print("::error::No parseable tags found for MultiboxLabs/flow-browser")
+              sys.exit(1)
+
+          latest_tag = max(candidates, key=lambda x: x[0])[1]
+
+          gh_output("current", current)
+          gh_output("latest", latest_tag)
+          if current == latest_tag:
+              gh_output("needs_update", "false")
+              print(f"Manifest already at {latest_tag}; no PR needed.")
+          else:
+              gh_output("needs_update", "true")
+              print(f"Update available: {current} -> {latest_tag}")
+          PY
+
+      - name: Compute tarball SHA256
+        id: tarball
+        if: steps.versions.outputs.needs_update == 'true'
+        run: |
+          set -euo pipefail
+          LATEST='${{ steps.versions.outputs.latest }}'
+          URL="https://github.com/MultiboxLabs/flow-browser/archive/refs/tags/${LATEST}.tar.gz"
+          SHA=$(curl -fsSL "${URL}" | sha256sum | awk '{print $1}')
+          echo "sha256=${SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Update manifest URL and sha256
+        if: steps.versions.outputs.needs_update == 'true'
+        env:
+          LATEST: ${{ steps.versions.outputs.latest }}
+          SHA: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+
+          latest = os.environ["LATEST"]
+          sha = os.environ["SHA"]
+          path = pathlib.Path("com.flow_browser.flow.yml")
+          text = path.read_text()
+          pattern = (
+              r"(      - type: archive\r?\n"
+              r"        url: https://github.com/MultiboxLabs/flow-browser/archive/refs/tags/)"
+              r"v[^\r\n ]+\.tar\.gz\r?\n"
+              r"(        sha256: )[a-f0-9]{64}"
+          )
+
+          def repl(match):
+              return f"{match.group(1)}{latest}.tar.gz\n{match.group(2)}{sha}"
+
+          new_text, count = re.subn(pattern, repl, text, count=1)
+          if count != 1:
+              raise SystemExit(f"Expected 1 manifest replacement, got {count}")
+          path.write_text(new_text)
+          PY
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.versions.outputs.needs_update == 'true'
+        with:
+          bun-version: latest
+
+      - name: Regenerate generated-sources.json
+        if: steps.versions.outputs.needs_update == 'true'
+        run: ./generate-sources.sh '${{ steps.versions.outputs.latest }}'
+
+      - name: Create pull request
+        if: steps.versions.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          commit-message: 'Update flow-browser to ${{ steps.versions.outputs.latest }}'
+          title: 'Update flow-browser to ${{ steps.versions.outputs.latest }}'
+          branch: automated/flow-browser-${{ steps.versions.outputs.latest }}
+          body: |
+            Automated bump from `${{ steps.versions.outputs.current }}` to `${{ steps.versions.outputs.latest }}`.
+
+            - Updated archive URL and `sha256` in `com.flow_browser.flow.yml`
+            - Regenerated `generated-sources.json` with `./generate-sources.sh`
+            - Prerelease tags considered when picking latest: **${{ inputs.include_prereleases }}** (workflow input)
+          delete-branch: true
