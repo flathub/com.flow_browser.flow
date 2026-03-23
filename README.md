@@ -1,3 +1,3 @@
-# Flow browser flatpak
+# Flatpak Manifest for Flow Browser
 
-Find flow browser at https://flow-browser.com
+Main Repository: https://github.com/MultiboxLabs/flow-browser
