@@ -35,8 +35,8 @@ modules:
     subdir: main
     sources:
       - type: archive
-        url: https://github.com/MultiboxLabs/flow-browser/archive/refs/tags/v0.12.0.tar.gz
-        sha256: 002e392f783d920a5063e329125b372654e19e1c5b110c2a25500368fe66addf
+        url: https://github.com/MultiboxLabs/flow-browser/archive/refs/tags/v0.12.1.tar.gz
+        sha256: b31948d96a9a774787b5fabad3082115f0f70589c10bb83aeb8fef4f969ed266
         dest: main
         x-checker-data:
           type: git
